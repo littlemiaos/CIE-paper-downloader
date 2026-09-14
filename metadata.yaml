@@ -3,8 +3,8 @@ display_name: CIE 试卷下载
 desc: 从 XtremePapers 下载 Cambridge International (CIE/CAIE) 的 IGCSE / AS & A Level / O Level 历年真题、答案、分数线、考官报告等 PDF。
 short_desc: 一键下载 CIE 历年真题与答案
 version: v1.1.0
-author: AstrBot
-repo: https://github.com/example/astrbot_plugin_cie_papers
+author: littlemiaos
+repo: https://github.com/littlemiaos/CIE-paper-downloader
 astrbot_version: ">=4.5,<5"
 support_platforms:
   - aiocqhttp
