@@ -20,6 +20,10 @@ _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PKG_DIR not in sys.path:
     sys.path.insert(0, _PKG_DIR)
 
+# 热重载时清除本插件子模块的缓存，避免 AstrBot 热重载复用旧代码
+for _m in [m for m in list(sys.modules) if m == "cie_papers" or m.startswith("cie_papers.")]:
+    sys.modules.pop(_m, None)
+
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
@@ -125,27 +129,31 @@ class CiePapersPlugin(Star):
     # ------------------------------------------------------------------ 命令
     @filter.command("cie")
     async def cie(self, event: AstrMessageEvent):
-        text = (event.message_str or "").strip()
-        tokens = text.split()
-        if tokens and tokens[0].lstrip("/").lower() == "cie":
-            tokens = tokens[1:]
-        cmd = tokens[0].lower() if tokens else ""
-        rest = " ".join(tokens[1:]) if len(tokens) > 1 else ""
+        try:
+            text = (event.message_str or "").strip()
+            tokens = text.split()
+            if tokens and tokens[0].lstrip("/").lower() == "cie":
+                tokens = tokens[1:]
+            cmd = tokens[0].lower() if tokens else ""
+            rest = " ".join(tokens[1:]) if len(tokens) > 1 else ""
 
-        if cmd in ("", "help", "帮助", "h", "?"):
+            if cmd in ("", "help", "帮助", "h", "?"):
+                yield event.plain_result(HELP_TEXT)
+                return
+            if cmd in (
+                "list", "ls", "列表", "科目", "subjects", "subject",
+                "papers", "paper", "find", "search", "查找", "文件",
+            ):
+                yield event.plain_result(await self._cmd_list(rest))
+                return
+            if cmd in ("get", "download", "下载", "dl", "down"):
+                async for r in self._cmd_get(event, rest):
+                    yield r
+                return
             yield event.plain_result(HELP_TEXT)
-            return
-        if cmd in (
-            "list", "ls", "列表", "科目", "subjects", "subject",
-            "papers", "paper", "find", "search", "查找", "文件",
-        ):
-            yield event.plain_result(await self._cmd_list(rest))
-            return
-        if cmd in ("get", "download", "下载", "dl", "down"):
-            async for r in self._cmd_get(event, rest):
-                yield r
-            return
-        yield event.plain_result(HELP_TEXT)
+        except Exception as e:
+            logger.error(f"CIE 插件处理异常: {e}", exc_info=True)
+            yield event.plain_result(f"❌ 处理出错: {e}")
 
     async def _cmd_list(self, rest: str) -> str:
         toks = rest.strip().lower().split()
@@ -303,6 +311,7 @@ class CiePapersPlugin(Star):
         types = ["qp", "ms"] if ptype in (None, "all") else [ptype]
         ok = 0
         stopped = False
+        not_found = False
         for tp in types:
             fname = f"{code}_{session}{year}_{tp}_{paper}.pdf"
             url = self.source.file_url(level, folder, fname)
@@ -312,9 +321,13 @@ class CiePapersPlugin(Star):
                 yield event.plain_result(f"📄 {label}「{fname}」\n🔗 {url}")
                 ok += 1
                 continue
-            path = await self.downloader.download(url, fname)
+            path, reason = await self.downloader.download(url, fname)
             if not path:
-                yield event.plain_result(f"⚠️ 下载失败: {label}「{fname}」")
+                if reason == "not_found":
+                    not_found = True
+                    yield event.plain_result(f"❌ 未找到 {label}「{fname}」：源站无此文件（可能该考季尚未收录）。")
+                else:
+                    yield event.plain_result(f"⚠️ 下载失败({reason}): {label}「{fname}」")
                 if self.cfg.stop_on_failure:
                     stopped = True
                     break
@@ -324,7 +337,10 @@ class CiePapersPlugin(Star):
             ok += 1
 
         if stopped:
-            yield event.plain_result("⏹ 已按配置在首次失败时停止。可在插件配置中关闭「下载失败即停止」。")
+            if not_found:
+                yield event.plain_result(f"💡 源站未收录该文件，可用 /cie list {code} 查看可用的考季与卷号。")
+            else:
+                yield event.plain_result("⏹ 已按配置在首次失败时停止。可在插件配置中关闭「下载失败即停止」。")
         elif ok == 0:
             yield event.plain_result(
                 f"💡 可尝试 /cie list {code} {session}{year} 查看该考季实际存在的文件。"
