@@ -30,10 +30,8 @@ from astrbot.api import logger
 
 try:
     import astrbot.api.message_components as Comp
-
-    FileComp = Comp.File
 except Exception:  # pragma: no cover
-    FileComp = None
+    Comp = None
 
 from cie_papers.config import Cfg, SESSION_NAMES, TYPE_NAMES
 from cie_papers.sources import get_source, DEFAULT_UA
@@ -51,16 +49,21 @@ HELP_TEXT = (
     "  /cie list <代码>           查看该科目可用卷号与考季\n"
     "  /cie list <代码> <考季>    查看某考季的具体文件\n"
     "  例: /cie list 0580 s20\n\n"
-    "⚡ 直接下载（熟练后）:\n"
+    "⚡ 单个下载:\n"
     "  /cie get <代码> <考季><年份> <卷号> [类型]\n"
     "  例: /cie get 0580 s20 21        试卷+答案\n"
-    "  例: /cie get 0580 s20 21 qp     仅试卷\n"
-    "  例: /cie get 9709 w19 32 ms     仅答案\n\n"
+    "  例: /cie get 9709 w24 32 ms     仅答案\n\n"
+    "📦 批量下载:\n"
+    "  /cie getall <代码> <考季><年份> [卷号范围] [类型]\n"
+    "  例: /cie getall 0580 s20            该考季全部\n"
+    "  例: /cie getall 0580 s20 11-42      卷号 11~42\n"
+    "  例: /cie getall 0580 s20 11-42 qp   仅试卷\n"
+    "  例: /cie getall 0580 s20 11,12,21   指定卷号\n\n"
     "📌 考季: s=5/6月 m=3月 w=10/11月\n"
     "📌 类型: qp=试卷 ms=答案 gt=分数线 er=考官报告 all=试卷+答案(默认)\n"
     "📌 常用: 0580数学 0620化学 0625物理 0610生物 0478计算机\n"
     "        9709数学(AL) 9701化学(AL) 9702物理(AL) 9700生物(AL)\n"
-    "📌 输出形式/下载源/超时等可在插件配置中修改\n"
+    "📌 输出形式/批量上限/下载源/超时等可在插件配置中修改\n"
     "数据来源: XtremePapers"
 )
 
@@ -74,7 +77,7 @@ class CiePapersPlugin(Star):
         self.source = get_source(self.cfg, self.http)
         self.resolver = SubjectResolver(self.source)
         self.downloader = Downloader(self.http, self.cfg)
-        self.output = OutputFormatter(self.cfg, FileComp)
+        self.output = OutputFormatter(self.cfg, Comp)
 
     async def initialize(self):
         # 后台预热科目缓存，加速后续查询
@@ -126,6 +129,72 @@ class CiePapersPlugin(Star):
             ptype = "all"
         return code, session, year, ptype, paper
 
+    @staticmethod
+    def _parse_getall(raw: str):
+        """解析批量参数: <代码> <考季><年份> [卷号范围] [类型] -> (code, session, year, range, type)。"""
+        toks = raw.lower().split()
+        if not toks or not re.fullmatch(r"\d{4}", toks[0]):
+            return None
+        code = toks[0]
+        session = year = rng = ptype = None
+        i = 1
+        if i < len(toks):
+            t = toks[i]
+            m = re.fullmatch(r"([smw])(\d{2}|\d{4})", t)
+            if m:
+                session, year = m.group(1), m.group(2)
+                i += 1
+            elif t in ("s", "m", "w"):
+                session = t
+                i += 1
+        if year is None and i < len(toks) and re.fullmatch(r"\d{2}|\d{4}", toks[i]):
+            year = toks[i]
+            i += 1
+        for t in toks[i:]:
+            if t == "all" or t in TYPE_NAMES:
+                ptype = t
+            elif re.fullmatch(r"\d{2}([,-]\d{2})*", t):
+                rng = t
+            elif t in ("s", "m", "w") and session is None:
+                session = t
+            elif re.fullmatch(r"\d{2}|\d{4}", t) and year is None:
+                year = t
+        if session is None or year is None:
+            return None
+        if len(year) == 4:
+            year = year[2:]
+        if ptype is None:
+            ptype = "all"
+        return code, session, year, rng, ptype
+
+    @staticmethod
+    def _paper_matcher(spec: str):
+        """把 '11-42' / '11,12,21' / '11' 解析成卷号匹配函数。"""
+        if not spec:
+            return lambda n: True
+        singles = set()
+        ranges = []
+        try:
+            for part in spec.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if "-" in part:
+                    a, b = part.split("-", 1)
+                    lo, hi = int(a), int(b)
+                    if lo > hi:
+                        lo, hi = hi, lo
+                    ranges.append((lo, hi))
+                else:
+                    singles.add(int(part))
+        except (ValueError, TypeError):
+            return lambda n: False
+
+        def match(n):
+            return n in singles or any(lo <= n <= hi for lo, hi in ranges)
+
+        return match
+
     # ------------------------------------------------------------------ 命令
     @filter.command("cie")
     async def cie(self, event: AstrMessageEvent):
@@ -145,6 +214,10 @@ class CiePapersPlugin(Star):
                 "papers", "paper", "find", "search", "查找", "文件",
             ):
                 yield event.plain_result(await self._cmd_list(rest))
+                return
+            if cmd in ("getall", "batch", "ga", "all", "批量"):
+                async for r in self._cmd_getall(event, rest):
+                    yield r
                 return
             if cmd in ("get", "download", "下载", "dl", "down"):
                 async for r in self._cmd_get(event, rest):
@@ -345,3 +418,95 @@ class CiePapersPlugin(Star):
             yield event.plain_result(
                 f"💡 可尝试 /cie list {code} {session}{year} 查看该考季实际存在的文件。"
             )
+
+    async def _cmd_getall(self, event: AstrMessageEvent, rest: str):
+        parsed = self._parse_getall(rest)
+        if parsed is None:
+            yield event.plain_result(
+                "❌ 参数不完整。\n用法: /cie getall <科目代码> <考季><年份> [卷号范围] [类型]\n"
+                "例: /cie getall 0580 s20            该考季全部\n"
+                "    /cie getall 0580 s20 11-42      卷号 11~42\n"
+                "    /cie getall 0580 s20 11-42 qp   仅试卷\n"
+                "考季: s=5/6月 m=3月 w=10/11月 | 范围: 11-42 或 11,12,21 | 类型: qp/ms/gt/er/all(默认)"
+            )
+            return
+        code, session, year, rng, ptype = parsed
+        yield event.plain_result(f"🔍 正在查找 {code}_{session}{year} 的批量文件，请稍候…")
+
+        try:
+            pair = await self.resolver.resolve(code)
+        except Exception as e:  # pragma: no cover
+            logger.error(f"解析科目失败: {e}")
+            yield event.plain_result(f"❌ 查询科目失败: {e}")
+            return
+        if not pair:
+            yield event.plain_result(f"❌ 未找到科目代码 {code}。可用 /cie list 查看科目列表。")
+            return
+        level, folder = pair
+
+        try:
+            all_files = await self.source.list_files(level, folder)
+        except Exception as e:  # pragma: no cover
+            yield event.plain_result(f"❌ 获取文件列表失败: {e}")
+            return
+
+        prefix = f"{code}_{session}{year}_"
+        types = ["qp", "ms"] if ptype in (None, "all") else [ptype]
+        matcher = self._paper_matcher(rng)
+        selected = []
+        for f in all_files:
+            if not f.startswith(prefix):
+                continue
+            p = parse_fname(f, code)
+            if not p:
+                continue
+            tp, paper = p[2], p[3]
+            if tp not in types:
+                continue
+            if not paper.isdigit() or not matcher(int(paper)):
+                continue
+            selected.append(f)
+        selected = sorted(set(selected), key=lambda f: sort_key(f, code), reverse=True)
+        total = len(selected)
+        if total == 0:
+            yield event.plain_result(
+                f"❌ 未找到匹配 {code} {session}{year} 的文件。可用 /cie list {code} {session}{year} 查看。"
+            )
+            return
+
+        limit = max(1, min(int(self.cfg.batch_limit), 50))
+        picked = selected[:limit] if total > limit else selected
+        tip = f"（共 {total} 个，本次下载前 {limit} 个）" if total > limit else f"（共 {total} 个）"
+        yield event.plain_result(f"📦 开始批量下载 {code} {session}{year} {tip}…")
+
+        items = []
+        ok = 0
+        for fname in picked:
+            url = self.source.file_url(level, folder, fname)
+            p = parse_fname(fname, code)
+            tp = p[2] if p else ""
+            label = TYPE_NAMES.get(tp, tp)
+            # text 模式无需下载
+            if self.cfg.output_format == "text":
+                items.append((None, fname, url, label))
+                ok += 1
+                continue
+            path, reason = await self.downloader.download(url, fname)
+            if not path:
+                if reason == "not_found":
+                    yield event.plain_result(f"❌ 未找到「{fname}」")
+                else:
+                    yield event.plain_result(f"⚠️ 下载失败({reason})「{fname}」")
+                if self.cfg.stop_on_failure:
+                    break
+                continue
+            items.append((path, fname, url, label))
+            ok += 1
+
+        if not items:
+            yield event.plain_result("💡 没有成功的内容可发送。")
+            return
+
+        for r in await self.output.build_batch(event, items, f"{code} {session}{year}"):
+            yield r
+        yield event.plain_result(f"✅ 批量完成：成功 {ok} / {total} 个。")

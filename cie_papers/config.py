@@ -3,9 +3,12 @@
 DEFAULT_TIMEOUT = 60
 DEFAULT_OUTPUT = "pdf"
 DEFAULT_SOURCE = "xtremepapers"
+DEFAULT_BATCH_OUTPUT = "file"
+DEFAULT_BATCH_LIMIT = 20
 
 OUTPUT_FORMATS = ("pdf", "image", "text")
 SOURCE_OPTIONS = ("xtremepapers", "custom")
+BATCH_OUTPUTS = ("file", "forward")
 
 SESSION_NAMES = {"s": "5/6月", "m": "3月", "w": "10/11月"}
 TYPE_NAMES = {
@@ -123,3 +126,16 @@ class Cfg:
     @property
     def custom_api_base(self):
         return (self.get("custom_api_base", "") or "").strip()
+
+    @property
+    def batch_output(self):
+        v = self.get("batch_output", DEFAULT_BATCH_OUTPUT)
+        return v if v in BATCH_OUTPUTS else DEFAULT_BATCH_OUTPUT
+
+    @property
+    def batch_limit(self):
+        try:
+            n = int(self.get("batch_limit", DEFAULT_BATCH_LIMIT))
+            return n if n > 0 else DEFAULT_BATCH_LIMIT
+        except (TypeError, ValueError):
+            return DEFAULT_BATCH_LIMIT

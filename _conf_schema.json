@@ -6,6 +6,19 @@
     "options": ["pdf", "image", "text"],
     "default": "pdf"
   },
+  "batch_output": {
+    "description": "批量下载输出方式",
+    "type": "string",
+    "hint": "file=每个文件单独发送；forward=合并转发为聊天记录(主要 OneBot v11 支持)",
+    "options": ["file", "forward"],
+    "default": "file"
+  },
+  "batch_limit": {
+    "description": "批量下载上限",
+    "type": "int",
+    "hint": "单次批量最多处理多少个文件（会被限制在 1-50）",
+    "default": 20
+  },
   "stop_on_failure": {
     "description": "下载失败即停止",
     "type": "bool",
